@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Superset + Cube RLS Demo</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Superset + Cube + SQL Server &mdash; Row-Level Security Demo</h1>
+      <p class="subtitle">
+        Switch personas below. It is the <strong>same</strong> embedded Superset
+        dashboard for every persona &mdash; what changes is the data each persona
+        is allowed to see, enforced independently by both Superset and Cube.
+        Use the query-log panel to see exactly where each hop applied its filter.
+      </p>
+    </header>
+
+    <main>
+      <section id="persona-switcher" aria-label="Persona switcher">
+        <p class="loading">Loading personas&hellip;</p>
+      </section>
+
+      <section id="totals-panel" aria-label="Expected total">
+        <div class="total-card">
+          <span class="label">Expected total for this persona</span>
+          <span id="expected-total" class="value">&ndash;</span>
+          <span class="hint">Verified directly against SQL Server &mdash; see personas.json</span>
+        </div>
+        <div class="total-card">
+          <span class="label">What to check</span>
+          <span class="hint">
+            Compare this figure to the big-number tile in the dashboard below.
+            A scoped persona must never show the unfiltered grand total
+            ($80,450,596.98).
+          </span>
+        </div>
+      </section>
+
+      <section id="dashboard-container" aria-label="Embedded Superset dashboard">
+        <div id="superset-embed"><p class="loading">Choose a persona to load the dashboard.</p></div>
+      </section>
+
+      <section id="explain-panel" aria-label="Query-log inspection">
+        <h2>Query-log inspection</h2>
+        <p>
+          Runs <code>EXPLAIN</code> on Cube's SQL API as the current persona &mdash;
+          the same identity a real dashboard query carries &mdash; and shows
+          Cube's query plan, including the filter it injected.
+        </p>
+        <button id="explain-button" disabled>Run EXPLAIN as current persona</button>
+        <pre id="explain-output">Select a persona first.</pre>
+      </section>
+    </main>
+
+    <script type="module" src="/main.js"></script>
+  </body>
+</html>

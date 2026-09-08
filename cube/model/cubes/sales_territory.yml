@@ -1,0 +1,30 @@
+cubes:
+  - name: sales_territory
+    sql_table: dbo.DimSalesTerritory
+    public: false # query only via reseller_sales_view -- see that file's description
+    description: >
+      The dimension this whole demo filters on: `territory_group` is the
+      column the row-level security policy ultimately restricts. The policy
+      itself is NOT declared here, though -- see
+      cube/model/cubes/reseller_sales.yml's access_policy and its
+      rls_territory_group dimension for why (access_policy forbids
+      cross-cube member references, so a policy declared on this cube
+      could not reach the fact table this demo actually needs to restrict).
+
+    dimensions:
+      - name: sales_territory_key
+        sql: SalesTerritoryKey
+        type: number
+        primary_key: true
+
+      - name: territory_region
+        sql: SalesTerritoryRegion
+        type: string
+
+      - name: territory_country
+        sql: SalesTerritoryCountry
+        type: string
+
+      - name: territory_group
+        sql: SalesTerritoryGroup
+        type: string

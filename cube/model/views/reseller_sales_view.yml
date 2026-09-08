@@ -1,0 +1,35 @@
+# The RLS filter itself lives on the sales_territory cube's access_policy
+# (cube/model/cubes/sales_territory.yml), not here, and is not keyed to this
+# view's name at all -- it targets sales_territory's own `territory_group`
+# member directly, so renaming this view has no effect on it. This view
+# only needs to keep including territory_group (via the
+# reseller_sales.sales_territory join path below) for the filter to have
+# something to restrict when queried through here.
+#
+# (This note is a YAML comment, not a `description:` field, deliberately --
+# Cube's data-model compiler runs `description` strings through a Jinja/
+# Python preprocessing pass, which chokes on literal curly braces in plain
+# prose. Keep code-like snippets in comments, not in description text.)
+views:
+  - name: reseller_sales_view
+    description: >
+      The single view the Superset dataset is built on. Cube's own guidance
+      is to point SQL API clients at views with an explicit join path rather
+      than at raw cubes, so joins and fan/chasm-trap handling are resolved
+      once here instead of relied on implicitly per chart.
+
+    cubes:
+      - join_path: reseller_sales
+        includes: "*"
+
+      - join_path: reseller_sales.sales_territory
+        includes:
+          - territory_region
+          - territory_country
+          - territory_group
+
+      - join_path: reseller_sales.product
+        includes:
+          - product_name
+          - product_line
+          - color

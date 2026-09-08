@@ -1,0 +1,24 @@
+# Secrets and machine-specific config -- never commit
+.env
+
+# Database backup -- data, not source; see README "Data source" for how to
+# reproduce it from your own local AdventureWorksDW if this is missing
+mssql/backup/*.bak
+
+# Cube's own embedded Cube Store runtime state (dev-mode pre-aggregation
+# bookkeeping) -- regenerated on container start, not source
+cube/.cubestore/
+
+# Node
+node_modules/
+frontend/dist/
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*

@@ -1,0 +1,168 @@
+cubes:
+  - name: reseller_sales
+    sql_table: dbo.FactResellerSales
+    public: false # query only via reseller_sales_view -- see that file's description
+    description: >
+      One row per reseller sales order line. This is the fact table the RLS
+      demo filters, declaratively, via the access_policy below -- see
+      cube/cube.js's checkSqlAuth for the identity layer it depends on, and
+      personas.json for the territory group each persona is scoped to.
+      Deliberately has NO pre_aggregations block: Cube's refresh worker
+      builds pre-aggregations with an undefined security context, so a
+      naive pre-aggregation here would either build unfiltered and leak
+      data, or require scheduledRefreshContexts kept in lockstep with
+      personas.json -- true of any row-filtering mechanism, imperative or
+      declarative, since none of them run against a security context a
+      scheduled refresh doesn't have. Not worth the risk for a PoC.
+
+    # Row-level security, defined the way Cube's own docs recommend for
+    # exactly this case: docs.cube.dev/docs/data-modeling/access-control/
+    # row-level-security. An earlier version of this demo injected the same
+    # filter imperatively from cube/cube.js's queryRewrite; moved here
+    # because (a) it's the documented, idiomatic mechanism, not a
+    # workaround; (b) it reads as policy sitting next to the column it
+    # restricts, instead of a string built up in JS; (c) it applies to any
+    # API surface Cube exposes (SQL API, REST, GraphQL) uniformly, where a
+    # queryRewrite hook only fires for query paths that call it.
+    #
+    # Two hard constraints below were found live, not by reading a
+    # changelog -- both turned "should be a five-minute change" into a real
+    # investigation:
+    #
+    # 1. access_policy filters cannot reference another cube's member.
+    #    `territory_group` lives on sales_territory, not here, and pointing
+    #    a filter at `member: sales_territory.territory_group` compiles...
+    #    into a hard error: "Paths aren't allowed in the accessPolicy policy
+    #    but 'sales_territory.territory_group' provided as a filter member
+    #    reference for reseller_sales". That is why rls_territory_group
+    #    exists below: a LOCAL dimension on this cube, computed with a
+    #    correlated scalar subquery that reaches into DimSalesTerritory
+    #    without ever being a cross-cube reference at the access_policy
+    #    layer. (Putting the policy on sales_territory itself, where
+    #    `territory_group` IS a local member, compiles fine but silently
+    #    filters nothing: a query for just this cube's own
+    #    total_sales_amount never needs to join sales_territory at all, so
+    #    the optimizer correctly drops it, and a row-level policy on a
+    #    table nothing joins to has nothing to restrict -- confirmed via
+    #    trace logs showing zero JOIN and an empty `filters: []` at every
+    #    planning stage. Exactly how native SQL-database row-level security
+    #    behaves too: a predicate on a table your query never touches is a
+    #    no-op, not an error.)
+    # 2. access_policy is a complete no-op under CUBEJS_DEV_MODE=true.
+    #    Cube's own docs only document dev mode as disabling *member-level*
+    #    access control; row-level access_policy enforcement turned out to
+    #    be silently inert under it too, undocumented, confirmed by
+    #    comparing identical queries and traces with dev mode on vs. off --
+    #    every persona got the unfiltered grand total under dev mode, and
+    #    the correct per-persona totals immediately after switching
+    #    CUBEJS_DEV_MODE to "false" with a real Cube Store attached (see
+    #    docker-compose.yml's `cube` and `cubestore` services). No change
+    #    was needed here to fix that half -- it was purely a deployment-mode
+    #    problem, not a data-model problem.
+    #
+    # `group: "*"` -- Cube's documented "any group" shorthand -- is used for
+    # BOTH entries below: this demo has no group/role hierarchy, only a flat
+    # securityContext.territoryGroup value per persona (see cube/cube.js's
+    # checkSqlAuth), and "*" needs no contextToGroups config to work with
+    # that (tried adding one; made no difference, so it was left out). The
+    # two entries key off securityContext.isUnrestricted and its negation,
+    # so they are mutually exclusive and exhaustive over every persona --
+    # exactly one is always the active grant -- deliberately, so "this
+    # group matched but no entry's conditions held" is never a state this
+    # depends on (Cube's docs don't specify that fallback behavior, so this
+    # design avoids needing it specified). isUnrestricted is a plain
+    # boolean computed in cube.js, not a `territoryGroup == '*'` comparison
+    # written here -- see cube.js's checkSqlAuth comment for why: Cube's
+    # access_policy expression parser rejects `==`/`!=` outright.
+    #
+    # NOTE the templating syntax below: single curly braces around each
+    # expression, e.g. securityContext.x wrapped in one brace on each side.
+    # That is deliberately NOT the double-curly-brace Jinja syntax used
+    # elsewhere in this data model (e.g. the native Superset RLS rule's
+    # current_username() call) -- access_policy expressions are a separate,
+    # later-stage mechanism, resolved per-request against the live security
+    # context, not at schema-compile time. This distinction is not
+    # academic: Cube runs this ENTIRE YAML file -- comments included --
+    # through its Jinja preprocessor before parsing it as YAML. Confirmed
+    # the hard way: an earlier draft of this very comment spelled out the
+    # double-brace syntax literally, and the schema compiler rejected the
+    # whole file with "unexpected end of variable block", pointing at this
+    # comment, not at any functional line. Single braces are not a Jinja
+    # delimiter, so they pass through untouched; two would not have.
+    access_policy:
+      - group: "*"
+        conditions:
+          - if: "{ not securityContext.isUnrestricted }"
+        row_level:
+          filters:
+            - member: rls_territory_group
+              operator: equals
+              values: [ "{ securityContext.territoryGroup }" ]
+
+      # The "admin" persona (personas.json: territoryGroup "*",
+      # securityContext.isUnrestricted true) is intentionally unrestricted
+      # -- it doubles as the identity Superset's own FAB admin login
+      # resolves to via DB_CONNECTION_MUTATOR, so dataset creation/preview
+      # in the Superset UI works against real, unfiltered data during
+      # setup. No row_level here means this entry contributes no filter at
+      # all -- see the "public by default" note in Cube's
+      # row-level-security docs.
+      - group: "*"
+        conditions:
+          - if: "{ securityContext.isUnrestricted }"
+
+    joins:
+      - name: sales_territory
+        sql: "{CUBE}.SalesTerritoryKey = {sales_territory}.SalesTerritoryKey"
+        relationship: many_to_one
+
+      - name: product
+        sql: "{CUBE}.ProductKey = {product}.ProductKey"
+        relationship: many_to_one
+
+      - name: calendar
+        sql: "{CUBE}.OrderDateKey = {calendar}.DateKey"
+        relationship: many_to_one
+
+    measures:
+      - name: count
+        type: count
+
+      - name: total_sales_amount
+        sql: SalesAmount
+        type: sum
+        description: >
+          Ground truth for the RLS demo. Verified unfiltered total across all
+          territories: 80,450,596.98. See personas.json for the expected
+          filtered total per persona -- the dashboard's big-number tile must
+          equal that value and never the unfiltered total for a scoped
+          persona.
+
+      - name: total_order_quantity
+        sql: OrderQuantity
+        type: sum
+
+    dimensions:
+      - name: sales_order_number
+        sql: SalesOrderNumber
+        type: string
+        primary_key: true
+
+      - name: sales_order_line_number
+        sql: SalesOrderLineNumber
+        type: number
+        primary_key: true
+
+      - name: order_date
+        sql: OrderDate
+        type: time
+
+      # Exists only for the access_policy above to filter on -- see that
+      # comment for why a correlated subquery, not the join already defined
+      # below, is what reaches DimSalesTerritory here. public: false hides
+      # it from the API surface; access_policy can still reference it
+      # internally regardless of that flag.
+      - name: rls_territory_group
+        sql: "(SELECT dst.SalesTerritoryGroup FROM dbo.DimSalesTerritory dst WHERE dst.SalesTerritoryKey = {CUBE}.SalesTerritoryKey)"
+        type: string
+        public: false

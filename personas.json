@@ -1,0 +1,33 @@
+{
+  "_comment": "Single source of truth for the demo's RLS personas. Loaded by cube/cube.js (as CUBEJS_PERSONAS_PATH) and by backend/personas.js. The browser only ever sends a persona id -- it never sends a territoryGroup or a SQL fragment. The expectedTotal fields are the verified ground-truth SUM(SalesAmount) figures from FactResellerSales, used by the frontend and by scripts/bootstrap.mjs's smoke test to assert RLS actually filtered the data.",
+  "personas": [
+    {
+      "id": "alice",
+      "displayName": "Alice Nakamura",
+      "description": "Regional manager, North America",
+      "territoryGroup": "North America",
+      "expectedTotal": 67985726.81
+    },
+    {
+      "id": "bob",
+      "displayName": "Bob Okafor",
+      "description": "Regional manager, Europe",
+      "territoryGroup": "Europe",
+      "expectedTotal": 10870534.80
+    },
+    {
+      "id": "carol",
+      "displayName": "Carol Nguyen",
+      "description": "Regional manager, Pacific",
+      "territoryGroup": "Pacific",
+      "expectedTotal": 1594335.38
+    },
+    {
+      "id": "admin",
+      "displayName": "Dana Petrov",
+      "description": "Global sales director (no territory restriction)",
+      "territoryGroup": "*",
+      "expectedTotal": 80450596.98
+    }
+  ]
+}

@@ -1,0 +1,233 @@
+name: superset-cube-rls-demo
+
+# All services pull official images -- no custom Dockerfiles. Overrides are
+# supplied via bind-mounted config files and env_file, following each
+# project's own documented extension points (see README "Why no Dockerfiles").
+x-superset-image: &superset-image apache/superset:6.1.0
+
+services:
+  # --------------------------------------------------------------------------
+  # Superset's own metadata store + cache/broker. Required by the official
+  # image regardless of whether we run Celery workers (we don't -- see the
+  # "no worker/beat" note below).
+  # --------------------------------------------------------------------------
+  superset-db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - superset_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  superset-redis:
+    image: redis:7
+    restart: unless-stopped
+    volumes:
+      - superset_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # One-shot: db upgrade -> create admin -> superset init. Must finish
+  # successfully before the app or bootstrap script touch Superset.
+  superset-init:
+    image: *superset-image
+    command: ["/app/docker/docker-init.sh"]
+    # The published apache/superset image runs as a non-root `superset`
+    # user by default, under which its own docker-bootstrap.sh (which
+    # docker-init.sh calls first) SKIPS installing a Postgres driver --
+    # that step is explicitly gated on `whoami = root`. Running as root
+    # here lets the image's own existing logic install it, rather than
+    # this project reinventing that step. Fine for a local demo; a real
+    # deployment should build an image with the driver baked in instead.
+    user: root
+    env_file: .env
+    environment:
+      # The plain apache/superset:6.1.0 tag does not ship
+      # docker/pythonpath_dev/superset_config.py at all (confirmed by
+      # exec'ing into the running container) -- that file only exists when
+      # an image is BUILT from Superset's own docker-compose-*.yml flow.
+      # SUPERSET_CONFIG_PATH is config.py's own, independent mechanism for
+      # loading an external config file and works regardless. See
+      # superset/superset_config_docker.py's header comment for the full
+      # story -- that file is fully self-contained, not an "override" of a
+      # base that doesn't exist here.
+      SUPERSET_CONFIG_PATH: /app/superset_config_docker.py
+    depends_on:
+      superset-db:
+        condition: service_healthy
+      superset-redis:
+        condition: service_healthy
+    volumes:
+      - superset_home:/app/superset_home
+      - ./superset/superset_config_docker.py:/app/superset_config_docker.py:ro
+
+  superset:
+    image: *superset-image
+    command: ["/app/docker/docker-bootstrap.sh", "app-gunicorn"]
+    user: root # see superset-init's comment above -- same reason
+    restart: unless-stopped
+    ports:
+      - "8088:8088"
+    env_file: .env
+    environment:
+      SUPERSET_CONFIG_PATH: /app/superset_config_docker.py
+    depends_on:
+      superset-init:
+        condition: service_completed_successfully
+    volumes:
+      - superset_home:/app/superset_home
+      - ./superset/superset_config_docker.py:/app/superset_config_docker.py:ro
+
+  # --------------------------------------------------------------------------
+  # SQL Server, containerized. The data is a restore of a real local
+  # AdventureWorksDW (see README "Data source" for how the .bak was
+  # produced) -- this is not the original "connect to a local instance"
+  # design; that needed a static TCP port, a scoped firewall rule, and an
+  # elevated PowerShell session, none of which a container needs.
+  # --------------------------------------------------------------------------
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    restart: unless-stopped
+    environment:
+      ACCEPT_EULA: "Y" # required by Microsoft's image; Developer edition is free for this use
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
+    ports:
+      - "1433:1433" # optional -- lets you connect from a host tool (e.g. Azure Data Studio) to inspect the restored data
+    volumes:
+      - mssql_data:/var/opt/mssql
+      - ./mssql/backup:/var/opt/mssql/backup:ro
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1' -b -o /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
+  # One-shot: restores AdventureWorksDW and creates the cube_reader login.
+  # See mssql/init.sh -- idempotent, safe to re-run.
+  mssql-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    restart: "no"
+    depends_on:
+      mssql:
+        condition: service_healthy
+    environment:
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
+      CUBEJS_DB_PASS: ${CUBEJS_DB_PASS}
+    volumes:
+      - ./mssql/init.sh:/init.sh:ro
+    entrypoint: ["/bin/bash", "/init.sh"]
+
+  # --------------------------------------------------------------------------
+  # Cube Store: required for CUBEJS_DEV_MODE=false, and NOT optional in this
+  # demo despite Cube's SQL API not otherwise needing it (dev mode auto-starts
+  # an embedded one, so this project ran without a separate Cube Store until
+  # RLS moved to a declarative access_policy -- see the `cube` service comment
+  # below for why dev mode itself had to go). No pre-aggregations are defined
+  # here, so this container's only job is being the queue/cache driver
+  # CUBEJS_DEV_MODE=false requires.
+  # --------------------------------------------------------------------------
+  cubestore:
+    image: cubejs/cubestore:latest
+    restart: unless-stopped
+    environment:
+      CUBESTORE_REMOTE_DIR: /cube/data
+    volumes:
+      - cubestore_data:/cube/data
+    healthcheck:
+      # No curl/wget/nc in this image (Debian-slim base) -- a bash /dev/tcp
+      # probe against the status port (visible in this image's own startup
+      # log: "Serving status probes at 0.0.0.0:3031") needs no extra tooling.
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/3031"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # --------------------------------------------------------------------------
+  # Cube. Must run with CUBEJS_DEV_MODE=false -- confirmed live, the hard way:
+  # with dev mode on, the sales_territory-restricting access_policy below
+  # compiled cleanly and looked correct, but every persona still got the
+  # unfiltered grand total through BOTH the SQL API and the REST API, with an
+  # empty `filters: []` at every stage of the query-planning trace. Cube's own
+  # docs only say dev mode "disables member-level access control"; row-level
+  # access_policy enforcement turned out to be silently inert under it too --
+  # not documented, found by comparing dev-mode vs. production-mode traces
+  # side by side. CUBEJS_DEV_MODE=false requires a real Cube Store (the
+  # `cubestore` service above) in exchange -- dev mode's embedded one no
+  # longer applies.
+  # --------------------------------------------------------------------------
+  cube:
+    image: cubejs/cube:v1.7.31
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+      - "${CUBEJS_PG_SQL_PORT}:${CUBEJS_PG_SQL_PORT}"
+    env_file: .env
+    environment:
+      CUBEJS_DEV_MODE: "false"
+      CUBEJS_CUBESTORE_HOST: cubestore
+      CUBEJS_CUBESTORE_PORT: "3030"
+      CUBEJS_DB_TYPE: mssql
+      CUBEJS_LOG_LEVEL: trace # verbose on purpose -- the demo's query-log panel reads this
+    depends_on:
+      mssql-init:
+        condition: service_completed_successfully
+      cubestore:
+        condition: service_healthy
+    volumes:
+      - ./cube:/cube/conf
+      - ./personas.json:/cube/conf/personas.json:ro
+
+  # --------------------------------------------------------------------------
+  # Our own Node services. No Dockerfiles: the official node image plus an
+  # `npm install` on container start keeps the demo's build surface small.
+  # --------------------------------------------------------------------------
+  backend:
+    image: node:22-alpine
+    working_dir: /app
+    command: sh -c "npm install --no-audit --no-fund && node server.js"
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT}:${BACKEND_PORT}"
+    env_file: .env
+    volumes:
+      - ./backend:/app
+      - backend_node_modules:/app/node_modules # named volume: keeps npm install off the Windows bind mount (much faster) and off the host tree
+      - ./personas.json:/app/personas.json:ro
+    depends_on:
+      - superset
+      - cube
+
+  frontend:
+    image: node:22-alpine
+    working_dir: /app
+    command: sh -c "npm install --no-audit --no-fund && npm run dev -- --host 0.0.0.0 --port 3000"
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file: .env
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    depends_on:
+      - backend
+
+volumes:
+  superset_db_data:
+  superset_redis_data:
+  superset_home:
+  mssql_data:
+  cubestore_data:
+  backend_node_modules:
+  frontend_node_modules:

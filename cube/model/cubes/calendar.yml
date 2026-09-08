@@ -1,0 +1,36 @@
+cubes:
+  - name: calendar
+    sql_table: dbo.DimDate
+    public: false # query only via reseller_sales_view -- see that file's description
+    description: >
+      Calendar dimension. The minimal dashboard's trend line charts
+      reseller_sales.order_date (the fact table's own datetime column)
+      directly, for simplicity -- this cube is included for a future
+      drill-down by fiscal/calendar period rather than for the current
+      three charts.
+
+    dimensions:
+      - name: date_key
+        sql: DateKey
+        type: number
+        primary_key: true
+
+      - name: full_date
+        sql: FullDateAlternateKey
+        type: time
+
+      - name: calendar_year
+        sql: CalendarYear
+        type: number
+
+      - name: calendar_quarter
+        sql: CalendarQuarter
+        type: number
+
+      - name: month_name
+        sql: EnglishMonthName
+        type: string
+
+      - name: month_number
+        sql: MonthNumberOfYear
+        type: number

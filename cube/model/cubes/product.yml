@@ -1,0 +1,32 @@
+cubes:
+  - name: product
+    sql_table: dbo.DimProduct
+    public: false # query only via reseller_sales_view -- see that file's description
+    description: >
+      Kept intentionally minimal -- LargePhoto (varbinary) and the many
+      localized name/description columns are excluded; the SQL API has no use
+      for them. Not charted by the demo's minimal dashboard (big-number
+      total, sales-by-territory, trend line), but included so a "sales by
+      product" chart can be added later without touching the data model.
+
+    dimensions:
+      - name: product_key
+        sql: ProductKey
+        type: number
+        primary_key: true
+
+      - name: product_name
+        sql: EnglishProductName
+        type: string
+
+      - name: product_line
+        sql: ProductLine
+        type: string
+
+      - name: color
+        sql: Color
+        type: string
+
+      - name: list_price
+        sql: ListPrice
+        type: number
