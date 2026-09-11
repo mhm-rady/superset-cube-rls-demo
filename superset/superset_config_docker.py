@@ -149,39 +149,9 @@ TALISMAN_DEV_CONFIG = _TALISMAN_CONFIG
 # ---------------------------------------------------------------------------
 PREVENT_UNSAFE_DB_CONNECTIONS = False
 
-# ---------------------------------------------------------------------------
-# Layer 1: identity propagation into Cube.
-# ---------------------------------------------------------------------------
-_CUBE_SQL_HOST = "cube"
-_CUBE_SQL_PORT = int(os.environ["CUBEJS_PG_SQL_PORT"])
-
-
-def DB_CONNECTION_MUTATOR(sqlalchemy_url, params, username, security_manager, source):
-    """
-    Fires on every SQLAlchemy engine Superset creates, for every database
-    connection it manages -- including requests from an embedded
-    guest-token user, where `username` resolves to the guest token's
-    `user.username`. This is the mechanism that makes per-end-user identity
-    propagation into Cube's SQL API possible at all; Cube's own Superset
-    integration docs stop at "connect as to a Postgres database" and never
-    mention it.
-
-    Only the Cube connection is touched -- every other database Superset
-    manages (notably its own metadata Postgres) is returned unchanged.
-    """
-    if sqlalchemy_url.host != _CUBE_SQL_HOST or sqlalchemy_url.port != _CUBE_SQL_PORT:
-        return sqlalchemy_url, params
-
-    if not username:
-        # No identity to propagate. Deliberately does NOT fall back to any
-        # default/service identity: leaving the connection's placeholder
-        # username in place means it reaches Cube as the unscoped sentinel
-        # (see scripts/bootstrap.mjs), which cube.js's checkSqlAuth rejects
-        # outright. Fail closed, not open.
-        return sqlalchemy_url, params
-
-    # Do NOT call security_manager.current_user here -- it raises when this
-    # mutator fires from SQL Lab's code path, because `g.user` is unset
-    # there (apache/superset#20455, still open as of 6.1.0). The `username`
-    # argument is passed in explicitly by Superset and is always safe.
-    return sqlalchemy_url.set(username=username), params
+# No DB_CONNECTION_MUTATOR here: Superset's stored Cube connection now
+# authenticates as one fixed identity ("superset_connection" in
+# personas.json, provisioned by scripts/bootstrap.mjs) rather than having
+# its username rewritten per end user. Per-request scoping happens entirely
+# through the native RLS rule's `__user` clause, authorized in
+# cube/cube.js's canSwitchSqlUser -- see that file for the full mechanism.

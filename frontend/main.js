@@ -93,9 +93,9 @@ async function embedForPersona(personaId) {
     const { dashboardUuid, supersetPublicUrl } = await getEmbedConfig();
     // Each persona switch calls fetchGuestToken again and mints a FRESH
     // token server-side (backend/server.js) -- this is exactly the
-    // "different end user requests the dashboard" case Layer 1
-    // (DB_CONNECTION_MUTATOR) and Layer 2 (__user) are designed around,
-    // not a simulated shortcut.
+    // "different end user requests the dashboard" case the native RLS
+    // rule's __user switch (cube/cube.js's canSwitchSqlUser) is designed
+    // around, not a simulated shortcut.
     await embedDashboard({
       id: dashboardUuid,
       supersetDomain: supersetPublicUrl,

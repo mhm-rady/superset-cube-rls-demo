@@ -43,8 +43,8 @@ Browser ──1── Express backend ──2── Superset API (mint guest tok
    │                                      │
    └──3── Superset embedded iframe ───────┘
                   │
-                  4  SQL over Postgres wire, connection username
-                  │  rewritten per end user by DB_CONNECTION_MUTATOR
+                  4  SQL over Postgres wire, fixed connection identity;
+                  │  Superset's native RLS rule asserts __user = persona
                   ▼
               Cube SQL API ──5── check_sql_auth → securityContext
                   │              access_policy (declarative) → mandatory filter
@@ -58,9 +58,15 @@ Browser ──1── Express backend ──2── Superset API (mint guest tok
 3. The browser hands that token to `@superset-ui/embedded-sdk`, which loads
    the dashboard in an iframe pointed directly at Superset (`frontend/main.js`).
 4. Every query the dashboard issues goes to Cube's Postgres-wire SQL API.
-   Superset's `DB_CONNECTION_MUTATOR` (**Layer 1**) rewrites the connection
-   username to the current persona's id *before the connection opens* —
-   this is what lets Cube see a real per-user identity at all.
+   Superset's *stored connection* to Cube always authenticates as one
+   fixed, non-privileged identity (`superset_connection` in
+   `personas.json`) rather than having its username rewritten per end
+   user — that identity's own access is zero rows by default. A native
+   Superset RLS rule attaches `__user = '<persona>'` to every query
+   instead, and Cube's `can_switch_sql_user` (**below**) authorizes the
+   switch only because the connection's current identity is that fixed
+   one — this is what lets Cube see a real per-user identity at all,
+   without the connection's own username ever being one.
 5. Cube's `check_sql_auth` (`cube/cube.js`) maps that username to a
    `securityContext`, and the `reseller_sales` cube's declarative
    `access_policy` (`cube/model/cubes/reseller_sales.yml`) reads it and
@@ -77,15 +83,19 @@ Browser ──1── Express backend ──2── Superset API (mint guest tok
    ```
    Cube enforces this itself and cannot be talked out of it by the client.
 
-**Layer 2** — the guest token also carries an `rls` clause using Cube's
-documented `__user` virtual filter (`__user = '<persona>'`).
-`can_switch_sql_user` in `cube/cube.js` only allows this to be a **no-op
-reassertion** of the identity Layer 1 already established — never a real
-switch to a different identity. Verified directly: opening a connection as
-`alice` and requesting `WHERE __user = 'bob'` fails with *"You cannot
-change security context via __user from alice to bob, because it's not
-allowed."* In the normal path this is redundant with Layer 1; its value is
-in the failure path — a connection-pool bug or misconfiguration that hands
+**The `__user` switch** — the guest token also carries an `rls` clause
+using Cube's documented `__user` virtual filter (`__user = '<persona>'`),
+and Superset's own native RLS rule asserts the same thing independently on
+every query. `can_switch_sql_user` in `cube/cube.js` allows this switch
+only when the connection's *current* identity is the fixed
+`superset_connection` identity — a real persona can only reassert **itself**
+(`current === next`), never switch to a different one. Verified directly:
+opening a connection as `alice` and requesting `WHERE __user = 'bob'` fails
+with *"You cannot change security context via __user from alice to bob,
+because it's not allowed."* Superset's own RLS rule and the guest token's
+`rls` clause independently produce the same `__user` assertion for the
+same request, so a bug in either one still gets caught by the other
+producing a mismatch — a connection-pool bug or misconfiguration that hands
 a request the wrong identity becomes a **hard query error**, not a silent
 cross-tenant leak.
 
@@ -474,7 +484,8 @@ confirmed live):
 docker-compose.yml       -- orchestrates every service (incl. cubestore --
                              required by reseller_sales.yml's access_policy)
 .env.example              -- copy to .env; see inline comments per variable
-personas.json              -- single source of truth for the 4 demo personas
+personas.json              -- single source of truth for the 4 demo personas,
+                              plus the internal "superset_connection" identity
 mssql/
   init.sh                   -- one-shot restore + cube_reader login (idempotent)
   backup/AdventureWorksDW.bak -- gitignored; see "Data source" above
@@ -488,7 +499,7 @@ cube/
   model/views/reseller_sales_view.yml -- what Superset's dataset is built on
 superset/
   superset_config_docker.py  -- self-contained config: metadata DB wiring,
-                                 embedding, CORS, Talisman, DB_CONNECTION_MUTATOR
+                                 embedding, CORS, Talisman
 backend/
   server.js                  -- /api/personas, /api/guest-token, /api/explain
   supersetClient.js           -- login -> CSRF -> guest token (shared with bootstrap.mjs)

@@ -28,6 +28,14 @@
       "description": "Global sales director (no territory restriction)",
       "territoryGroup": "*",
       "expectedTotal": 80450596.98
+    },
+    {
+      "id": "superset_connection",
+      "displayName": "Superset connection identity",
+      "description": "Not a real end user -- excluded from listPersonas() (backend/personas.js) for exactly that reason. The fixed identity Superset's stored Cube database connection authenticates as (see scripts/bootstrap.mjs and cube/cube.js's canSwitchSqlUser). territoryGroup is a value no real territory ever has, so this identity's own access_policy match returns zero rows -- any query that reaches Cube on this connection without an authorized __user switch fails closed to nothing, never to everything.",
+      "territoryGroup": "__no_access__",
+      "expectedTotal": 0,
+      "internal": true
     }
   ]
 }

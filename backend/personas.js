@@ -17,14 +17,21 @@ const byId = new Map(personas.map((p) => [p.id, p]));
  * ever sends a persona *id* (see server.js's /api/guest-token), so a
  * compromised or buggy frontend cannot request a scope it doesn't already
  * have server-side.
+ *
+ * Also excludes any `internal` entry -- personas.json's
+ * "superset_connection" is not a real end user, just the fixed identity
+ * Superset's Cube connection authenticates as (see cube/cube.js); it must
+ * never be offered as something a browser can select.
  */
 export function listPersonas() {
-  return personas.map(({ id, displayName, description, expectedTotal }) => ({
-    id,
-    displayName,
-    description,
-    expectedTotal,
-  }));
+  return personas
+    .filter((p) => !p.internal)
+    .map(({ id, displayName, description, expectedTotal }) => ({
+      id,
+      displayName,
+      description,
+      expectedTotal,
+    }));
 }
 
 export function getPersona(id) {

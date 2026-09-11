@@ -1,34 +1,41 @@
 // Cube configuration for the Superset + Cube + SQL Server RLS demo.
 //
-// This file implements the identity side of the two-layer RLS design (see
-// the project plan / README "Architecture" section). The actual row FILTER
-// is no longer here -- it lives declaratively in
-// cube/model/cubes/reseller_sales.yml's access_policy, per Cube's own
-// documented recommendation for row-level security (that file's comment
-// also covers two hard constraints found live: no cross-cube member
-// references in access_policy, and access_policy being a complete no-op
-// under CUBEJS_DEV_MODE=true). This file establishes the securityContext
-// that policy reads, and the identity-switching rules around it:
+// This file implements the identity side of the RLS design (see the
+// project plan / README "Architecture" section). The actual row FILTER is
+// not here -- it lives declaratively in cube/model/cubes/reseller_sales.yml's
+// access_policy, per Cube's own documented recommendation for row-level
+// security (that file's comment also covers two hard constraints found
+// live: no cross-cube member references in access_policy, and access_policy
+// being a complete no-op under CUBEJS_DEV_MODE=true). This file establishes
+// the securityContext that policy reads, and the identity-switching rules
+// around it:
 //
-//   Layer 1 (identity propagation, the real enforcement): Superset's
-//   DB_CONNECTION_MUTATOR (superset/superset_config_docker.py) rewrites the
-//   Postgres-wire connection username to the current end user's persona id
-//   before the connection is even opened. checkSqlAuth below maps that
-//   username to a securityContext, and reseller_sales.yml's access_policy
-//   reads it to inject the mandatory territory filter. Cube enforces this
-//   itself -- a client cannot talk its way out of it.
+//   Superset's stored Cube connection authenticates as one fixed,
+//   non-privileged identity -- "superset_connection" in personas.json,
+//   never a real end user's persona id. checkSqlAuth below maps that
+//   username to a securityContext exactly like any other persona, and that
+//   persona's territoryGroup ("__no_access__", matching no real territory)
+//   means a query against this connection returns zero rows by default.
 //
-//   Layer 2 (explicit assertion / failure-mode backstop): the guest token's
-//   `rls` clause and a native Superset RLS rule both emit
-//   `__user = '<persona id>'`, Cube's documented virtual filter for
-//   switching the SQL API session's identity mid-connection. canSwitchSqlUser
-//   below only allows a "switch" to the identity already on the connection --
-//   see that function's comment for why that specific, narrow rule is the
-//   point, not an oversight.
+//   Per-request scoping happens entirely through Cube's documented
+//   `__user = '<persona id>'` virtual filter -- emitted by the guest
+//   token's `rls` clause and by Superset's native RLS rule -- which asks
+//   Cube to switch the SQL API session to a different identity mid-
+//   connection. canSwitchSqlUser below authorizes that switch ONLY when
+//   the connection's current identity is "superset_connection": that fixed
+//   identity may become any real persona (each `__user` value still goes
+//   through checkSqlAuth's own persona lookup below, so an unrecognized
+//   target is rejected there, not here), but no persona may ever switch to
+//   a different persona, and nothing may switch to "superset_connection"
+//   itself. That is the entire enforcement boundary this file owns: one
+//   narrow, auditable class of identity transition, everything else
+//   rejected.
 //
 // Fail-closed by design: an unrecognized username is rejected outright
-// (checkSqlAuth throws). See reseller_sales.yml's access_policy comment
-// for how the declarative filter behaves if it were ever evaluated with a
+// (checkSqlAuth throws), and a connection that never gets an authorized
+// switch keeps its default zero-row identity rather than falling back to
+// anything unrestricted. See reseller_sales.yml's access_policy comment for
+// how the declarative filter behaves if it were ever evaluated with a
 // broken/missing security_context -- it can't run unfiltered, only empty.
 
 const fs = require('fs');
@@ -52,17 +59,21 @@ if (!sharedPassword) {
   throw new Error('CUBE_SQL_SHARED_PASSWORD is not set -- refusing to start');
 }
 
+// The one identity Superset's stored Cube connection ever authenticates as
+// (see scripts/bootstrap.mjs). Not a real end user -- see personas.json's
+// entry for why its own default access is zero rows -- and the only
+// identity canSwitchSqlUser (below) allows to become a different persona.
+const CONNECTION_IDENTITY_USER = 'superset_connection';
+
 module.exports = {
   checkSqlAuth: (req, userName, password) => {
     const persona = personasById[userName];
     if (!persona) {
-      // Deliberately includes the Superset DB connection's placeholder
-      // username ("unscoped_sentinel", see superset/superset_config_docker.py
-      // and scripts/bootstrap.mjs). If DB_CONNECTION_MUTATOR ever fails to
-      // fire -- e.g. because a request somehow carries an empty username --
-      // the connection lands here and is refused outright. That is the
-      // fail-closed behavior this design depends on: no persona match means
-      // no connection, never "connect anyway with no filter."
+      // Covers any username that isn't a real persona and isn't
+      // CONNECTION_IDENTITY_USER -- most importantly, an attempted __user
+      // switch to an identity that doesn't exist. This is the fail-closed
+      // backstop: no persona match means no connection/no switch, never
+      // "connect anyway with no filter."
       throw new Error('Access denied');
     }
 
@@ -95,18 +106,21 @@ module.exports = {
     };
   },
 
-  // Real per-user identity switching (escalating from one persona to a
-  // DIFFERENT persona mid-connection) is never allowed here -- deliberately.
+  // This is the entire per-request scoping mechanism now that Superset's
+  // stored connection always authenticates as CONNECTION_IDENTITY_USER
+  // (see that constant's comment): a switch is authorized only when the
+  // connection's CURRENT identity is that fixed, non-privileged identity.
+  // `next` doesn't need re-validating here -- Cube calls checkSqlAuth again
+  // for the target username before this runs (password absent, per the
+  // comment above), so an unrecognized `next` is already rejected there.
   //
-  // The only switch this permits is a no-op: reasserting the identity
-  // already on the connection. That covers Layer 2's normal-path use
-  // (the guest token's `__user = '<persona>'` clause reasserting the same
-  // persona Layer 1 already established), while turning any mismatch --
-  // e.g. a connection-pool bug that hands a request the wrong cached
-  // connection -- into a hard query failure instead of a silent
-  // cross-tenant data leak. That failure mode (loud error beats silent
-  // wrong-tenant data) is the entire point of having Layer 2 at all.
-  canSwitchSqlUser: (current, next) => current === next,
+  // A real persona is never allowed to switch to a DIFFERENT persona (or to
+  // CONNECTION_IDENTITY_USER itself) -- only the no-op self-reassertion
+  // (current === next) both guest-token and native-RLS re-auth paths rely
+  // on. That turns any mismatch -- e.g. a connection-pool bug that hands a
+  // request the wrong cached connection -- into a hard query failure
+  // instead of a silent cross-tenant data leak.
+  canSwitchSqlUser: (current, next) => current === next || current === CONNECTION_IDENTITY_USER,
 
   // No queryRewrite: the row filter is declared in
   // cube/model/cubes/reseller_sales.yml's access_policy instead. See that

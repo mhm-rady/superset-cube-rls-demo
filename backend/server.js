@@ -34,14 +34,18 @@ app.use(express.json());
 
 const superset = createSupersetClient(SUPERSET_INTERNAL_URL);
 
-// This backend authenticates to Superset as the FAB "admin" user, which is
-// -- deliberately, not coincidentally -- also the "admin" persona in
-// personas.json. See cube/cube.js and superset/superset_config_docker.py:
-// docker-init.sh hardcodes the FAB admin's username to "admin", and
-// DB_CONNECTION_MUTATOR propagates whatever Superset username is active
-// straight through to Cube, so giving the unrestricted demo persona the
-// same name means Superset's own admin naturally gets unfiltered access to
-// the Cube-backed dataset during setup, with no separate carve-out needed.
+// This backend authenticates to Superset as the FAB "admin" user purely to
+// call Superset's own administrative REST API (minting guest tokens) --
+// docker-init.sh hardcodes that login's username to "admin", which is also
+// -- deliberately, not coincidentally -- the name of the unrestricted
+// "admin" persona in personas.json (cube/cube.js). That shared name no
+// longer gets the FAB admin's own browser session (SQL Lab/dataset
+// preview) unfiltered access to Cube, now that Superset's stored
+// connection always authenticates as the fixed "superset_connection"
+// identity rather than having its username rewritten per Superset login --
+// see superset/superset_config_docker.py. It still matters here only in
+// that no OTHER real persona should ever collide with the FAB admin's own
+// username.
 // Cached indefinitely, NOT re-fetched on a timer -- Superset's access token
 // has its own expiry (observed: well under 24h), and this backend is meant
 // to run for the lifetime of the demo, so it WILL outlive the cached token.

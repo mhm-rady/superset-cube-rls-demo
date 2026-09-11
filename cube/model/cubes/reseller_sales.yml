@@ -101,12 +101,11 @@ cubes:
 
       # The "admin" persona (personas.json: territoryGroup "*",
       # securityContext.isUnrestricted true) is intentionally unrestricted
-      # -- it doubles as the identity Superset's own FAB admin login
-      # resolves to via DB_CONNECTION_MUTATOR, so dataset creation/preview
-      # in the Superset UI works against real, unfiltered data during
-      # setup. No row_level here means this entry contributes no filter at
-      # all -- see the "public by default" note in Cube's
-      # row-level-security docs.
+      # -- reachable via a __user = 'admin' switch (cube/cube.js's
+      # canSwitchSqlUser) the same way any other persona is, e.g. from the
+      # embedded frontend's own "admin" persona option. No row_level here
+      # means this entry contributes no filter at all -- see the "public by
+      # default" note in Cube's row-level-security docs.
       - group: "*"
         conditions:
           - if: "{ securityContext.isUnrestricted }"

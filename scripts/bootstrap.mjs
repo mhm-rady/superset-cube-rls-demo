@@ -69,14 +69,16 @@ const EMBEDDED_ROLE_NAME = 'Embedded';
 const DASHBOARD_TITLE = 'Reseller Sales (RLS Demo)';
 const RLS_RULE_NAME = 'Embedded guest -- reassert __user';
 
-// The username baked into Superset's STORED Database connection string.
-// Every real request's connection has its username rewritten away from
-// this by DB_CONNECTION_MUTATOR (superset/superset_config_docker.py)
-// before it reaches Cube. Deliberately not a recognized persona --
-// cube/cube.js's checkSqlAuth rejects it outright, so if the mutator ever
-// fails to fire, the connection is refused rather than silently
-// unfiltered. Fail closed, not open.
-const UNSCOPED_SENTINEL_USER = 'unscoped_sentinel';
+// The username baked into Superset's STORED Database connection string --
+// every request Superset issues against Cube authenticates as this fixed
+// identity, never a real end user's persona id. It IS a recognized persona
+// (personas.json), deliberately scoped to zero rows of its own
+// (territoryGroup "__no_access__"), and it's the only identity
+// cube/cube.js's canSwitchSqlUser allows to switch to a different persona
+// via the native RLS rule's `__user` clause (ensureRlsRule below). Fail
+// closed, not open: a query that reaches Cube on this connection without an
+// authorized switch sees nothing, never everything.
+const CONNECTION_IDENTITY_USER = 'superset_connection';
 
 const superset = createSupersetClient(SUPERSET_URL);
 
@@ -204,7 +206,7 @@ async function ensureDatabase() {
     return existing.id;
   }
 
-  const sqlalchemyUri = `postgresql+psycopg2://${UNSCOPED_SENTINEL_USER}:${env.CUBE_SQL_SHARED_PASSWORD}@cube:${env.CUBEJS_PG_SQL_PORT}/cube`;
+  const sqlalchemyUri = `postgresql+psycopg2://${CONNECTION_IDENTITY_USER}:${env.CUBE_SQL_SHARED_PASSWORD}@cube:${env.CUBEJS_PG_SQL_PORT}/cube`;
 
   await superset
     .withCsrf('POST', '/api/v1/database/test_connection/', {
@@ -225,11 +227,11 @@ async function ensureDatabase() {
     allow_ctas: false,
     allow_cvas: false,
     allow_dml: false,
-    // Identity propagation uses DB_CONNECTION_MUTATOR (Layer 1 -- see
-    // superset/superset_config_docker.py), a stronger, independent
-    // mechanism. Superset's own built-in impersonation flag stays off so
-    // there is exactly one mechanism doing this job, not two overlapping
-    // ones.
+    // Identity propagation happens via the __user switch authorized in
+    // cube/cube.js's canSwitchSqlUser, not by rewriting this connection's
+    // username per request. Superset's own built-in impersonation flag
+    // stays off regardless -- it isn't implemented for Cube's Postgres-wire
+    // engine spec anyway (see docs/RLS-CONFIGURATION.md).
     impersonate_user: false,
   });
   console.log(`Created database '${DATABASE_NAME}' (id ${created.id}).`);
@@ -305,9 +307,10 @@ async function ensureRlsRule(datasetId, roleId) {
   const created = await superset.withCsrf('POST', '/api/v1/rowlevelsecurity/', {
     name: RLS_RULE_NAME,
     description:
-      "Layer 2 backstop (see cube/cube.js): reasserts the current Superset username as Cube's __user on every " +
-      'query. Redundant with Layer 1 (DB_CONNECTION_MUTATOR) when everything works; converts a connection-identity ' +
-      'mismatch into a hard query error instead of a silent leak when it does not.',
+      "The actual per-request scoping mechanism (see cube/cube.js): asserts the current Superset username as " +
+      "Cube's __user on every query, which cube.js's canSwitchSqlUser authorizes only because the connection's " +
+      'own identity is the fixed, zero-access "superset_connection" persona. Without this clause, a query on this ' +
+      'connection sees nothing rather than something wrong.',
     filter_type: 'Regular',
     tables: [datasetId],
     roles: [roleId],
@@ -411,15 +414,17 @@ async function ensureEmbedding(dashboardId) {
 }
 
 /**
- * Connects to Cube's SQL API directly, as each persona, and compares the
- * result against personas.json's verified expectedTotal. This exercises
- * cube.js's checkSqlAuth plus the reseller_sales cube's declarative
- * access_policy in isolation -- the Cube side of Layer 1 -- which is a
+ * Connects to Cube's SQL API directly, as each persona (including the
+ * "superset_connection" identity itself, verifying its own zero-access
+ * default), and compares the result against personas.json's verified
+ * expectedTotal. This exercises cube.js's checkSqlAuth plus the
+ * reseller_sales cube's declarative access_policy in isolation, which is a
  * necessary (not sufficient) condition for the full stack working. It does
- * NOT exercise DB_CONNECTION_MUTATOR or Superset's
- * RLS rule, since it bypasses Superset entirely by design (bootstrap.mjs
- * has no 'pg' dependency of its own). The full path -- switch personas in
- * the browser and compare the dashboard's total -- is the headline test
+ * NOT exercise the __user switch (canSwitchSqlUser) or Superset's RLS rule,
+ * since it bypasses Superset entirely by design (bootstrap.mjs has no 'pg'
+ * dependency of its own) and connects as each identity directly with the
+ * shared password rather than switching. The full path -- switch personas
+ * in the browser and compare the dashboard's total -- is the headline test
  * described in the README and cannot be automated from here.
  *
  * Runs inside the `backend` container via `docker compose exec`, reusing
@@ -583,8 +588,12 @@ async function main() {
 
   const personasPath = path.join(repoRoot, 'personas.json');
   const personas = JSON.parse(readFileSync(personasPath, 'utf8')).personas;
+  // smokeTestCubeTotals covers every identity, including "superset_connection"
+  // itself (verifying its own zero-access default). smokeTestFullStack mints
+  // real guest tokens end to end, which only makes sense for real end users --
+  // exclude `internal` entries there, same as backend/personas.js's listPersonas.
   await smokeTestCubeTotals(personas);
-  await smokeTestFullStack(personas, bigNumberChartId);
+  await smokeTestFullStack(personas.filter((p) => !p.internal), bigNumberChartId);
 
   console.log('\nDone. Open http://localhost:3000');
 }
